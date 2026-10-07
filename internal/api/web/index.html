@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>M365Rescue — Cyber Recovery Console</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#14181f;--mut:#667085;--bd:#e4e7ec;--ac:#0b5fff;--ok:#067647;--bad:#b42318;--warn:#b54708}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1116;--card:#171b22;--tx:#e8eaed;--mut:#98a2b3;--bd:#2a303a;--ac:#6ea0ff;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+header{display:flex;gap:12px;align-items:center;padding:14px 20px;border-bottom:1px solid var(--bd);background:var(--card);flex-wrap:wrap}
+h1{font-size:17px;margin:0;flex:1}h2{font-size:14px;margin:0 0 10px}
+main{padding:16px 20px;display:grid;gap:14px;max-width:1300px;margin:auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px;overflow-x:auto}
+.stat b{display:block;font-size:22px}.stat span{color:var(--mut);font-size:12px}
+button{background:var(--ac);color:#fff;border:0;border-radius:7px;padding:7px 12px;cursor:pointer;font-size:13px}
+button.sec{background:transparent;color:var(--ac);border:1px solid var(--bd)}button.bad{background:var(--bad)}button:disabled{opacity:.5}
+input{padding:7px;border:1px solid var(--bd);border-radius:7px;background:var(--bg);color:var(--tx)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--bd);white-space:nowrap}th{color:var(--mut);font-weight:500}
+.ok{color:var(--ok)}.failed,.bad{color:var(--bad)}.retry,.running,.queued{color:var(--warn)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}pre{margin:0;white-space:pre-wrap;font-size:12.5px}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px}
+code{background:var(--bg);padding:1px 5px;border-radius:4px}
+</style></head><body>
+<header><h1>M365Rescue <small style="color:var(--mut);font-weight:400">Cyber Recovery Console</small></h1>
+<label>API key <input id="key" type="password" size="18" placeholder="dev-admin-key"></label><button class="sec" onclick="saveKey()">Connect</button></header>
+<main>
+<div class="card"><h2>Guided demo — ransomware recovery</h2>
+<div class="row"><button id="demoBtn" onclick="runDemo()">▶ Run full demo</button>
+<span style="color:var(--mut)">create synthetic tenant → seed → backup → simulate ransomware → point-in-time restore → verify</span></div>
+<pre id="demoLog" style="margin-top:10px"></pre></div>
+<div class="grid" id="stats"></div>
+<div class="two">
+<div class="card"><h2>Tenants</h2><div class="row" style="margin-bottom:8px"><input id="tname" placeholder="Tenant name"><button onclick="addTenant()">Add demo tenant</button></div><table id="tenants"></table></div>
+<div class="card"><h2>Failure injection (chaos)</h2><div class="row">
+<button class="sec" onclick="chaos({graph_429:.3,fetch_error:.1,storage_error:.1})">Throttle + errors</button>
+<button class="sec" onclick="chaos({worker_crash:.02})">Crash workers (2%)</button>
+<button class="sec" onclick="chaos({})">Clear</button></div><pre id="chaos" style="margin-top:8px"></pre></div></div>
+<div class="card"><h2>Backup jobs</h2><table id="jobs"></table></div>
+<div class="card"><h2>Immutable snapshots</h2><table id="snaps"></table></div>
+<div class="card"><h2>Restores &amp; verification</h2><table id="restores"></table></div>
+<div class="card"><h2>Audit log</h2><table id="audit"></table></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);let KEY=localStorage.getItem('k')||'dev-admin-key';$('key').value=KEY;
+function saveKey(){KEY=$('key').value;localStorage.setItem('k',KEY);load()}
+async function api(p,m='GET',b){const r=await fetch('/api/v1'+p,{method:m,headers:{'X-API-Key':KEY,'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});
+ const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const mb=n=>(n/1048576).toFixed(2)+' MB',sh=s=>esc(String(s||'').slice(0,8));
+function tbl(el,cols,rows){$(el).innerHTML='<tr>'+cols.map(c=>'<th>'+c[0]+'</th>').join('')+'</tr>'+rows.map(r=>'<tr>'+cols.map(c=>'<td>'+c[1](r)+'</td>').join('')+'</tr>').join('')}
+const st=s=>`<span class="${esc(s)}">${esc(s)}</span>`,dt=s=>s?new Date(s).toLocaleTimeString():'';
+async function load(){try{
+ const s=await api('/stats');const ratio=s.stored_bytes?(s.logical_bytes/s.stored_bytes).toFixed(1)+'x':'–';
+ $('stats').innerHTML=[['Tenants',s.tenants],['Snapshots',s.snapshots],['Unique objects',s.objects],['Logical data',mb(s.logical_bytes)],['Stored (encrypted)',mb(s.stored_bytes)],['Dedup+compress ratio',ratio],
+  ['Jobs ok / failed',s.jobs_success+' / '+s.jobs_failed],['Queue depth',s.queue_depth],['Running / retrying',s.jobs_running+' / '+s.jobs_retrying]].map(x=>`<div class="card stat"><b>${x[1]}</b><span>${x[0]}</span></div>`).join('');
+ const t=await api('/tenants');tbl('tenants',[['Name',r=>esc(r.name)],['Type',r=>r.demo?'demo':'M365'],['Last sync',r=>dt(r.last_sync)],['',r=>`<button class="sec" onclick="bk('${r.id}')">Backup</button> <button class="sec" onclick="seed('${r.id}')">Seed</button> <button class="bad" onclick="atk('${r.id}')">Ransomware</button>`]],t);
+ tbl('jobs',[['Tenant',r=>esc(r.tenant)],['Workload',r=>r.workload],['Status',r=>st(r.status)],['Attempts',r=>r.attempts],['Changed',r=>r.items_changed],['Bytes',r=>r.bytes],['Error',r=>esc(String(r.error).slice(0,60))],['Created',r=>dt(r.created_at)]],await api('/jobs'));
+ tbl('snaps',[['Snapshot',r=>sh(r.id)],['Workload',r=>r.workload],['Status',r=>st(r.status==='complete'?'ok':r.status)],['Objects',r=>r.object_count],['Size',r=>mb(r.total_bytes)],['Manifest',r=>sh(r.manifest_hash)],['Locked until',r=>r.retention_until?new Date(r.retention_until).toLocaleDateString():''],['Created',r=>dt(r.created_at)],['',r=>r.status==='complete'?`<button class="sec" onclick="rs('${r.id}')">Restore</button>`:'']],await api('/snapshots'));
+ tbl('restores',[['Tenant',r=>esc(r.tenant)],['Workload',r=>r.workload],['Status',r=>st(r.status==='complete'?'ok':r.status)],['Restored',r=>r.objects_restored],['Verified',r=>r.objects_verified],['Checksum failures',r=>r.checksum_failures],['Duration',r=>r.duration_ms+' ms'],['By',r=>r.actor]],await api('/restores'));
+ $('chaos').textContent=JSON.stringify(await api('/chaos'));
+ try{tbl('audit',[['Time',r=>dt(r.ts)],['Actor',r=>r.actor],['Action',r=>r.action],['Detail',r=>esc(String(r.detail).slice(0,70))],['Result',r=>r.result]],await api('/audit'))}catch(e){$('audit').innerHTML='<tr><td>audit role required</td></tr>'}
+}catch(e){$('stats').innerHTML='<div class="card bad">'+esc(e.message)+' — enter a valid API key</div>'}}
+const run=async(f)=>{try{await f()}catch(e){alert(e.message)}load()};
+const bk=id=>run(()=>api('/tenants/'+id+'/backup','POST')),seed=id=>run(()=>api('/demo/'+id+'/seed','POST')),atk=id=>run(()=>api('/demo/'+id+'/attack','POST')),rs=id=>run(()=>api('/restores','POST',{snapshot_id:id}));
+const addTenant=()=>run(()=>api('/tenants','POST',{name:$('tname').value||'Contoso (demo)',demo:true}));
+const chaos=b=>run(()=>api('/chaos','POST',b));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function idle(){for(let i=0;i<180;i++){const s=await api('/stats');if(!(s.queue_depth||s.jobs_running||s.jobs_retrying)&&!(await api('/jobs')).some(j=>j.status==='queued'))return;await sleep(1500)}}
+async function runDemo(){const L=m=>{$('demoLog').textContent+=m+'\n'};$('demoLog').textContent='';$('demoBtn').disabled=true;
+ try{const t=await api('/tenants','POST',{name:'Contoso-'+Math.floor(Math.random()*900+100)+' (demo)',demo:true});L('1. tenant created: '+t.name);
+ const c=await api('/demo/'+t.id+'/seed','POST');L('2. seeded synthetic M365: '+JSON.stringify(c));
+ await api('/tenants/'+t.id+'/backup','POST');L('3. backup queued across distributed workers…');await idle();
+ const snaps=(await api('/snapshots?tenant_id='+t.id)).filter(s=>s.status==='complete');L('   snapshots sealed: '+snaps.length+' (encrypted, deduplicated, object-locked)');
+ const a=await api('/demo/'+t.id+'/attack','POST');L('4. ⚠ RANSOMWARE: '+a.deleted+' items deleted, '+a.encrypted+' encrypted');
+ L('   live state: '+JSON.stringify(await api('/demo/'+t.id+'/live')));
+ for(const s of snaps)await api('/restores','POST',{snapshot_id:s.id});L('5. point-in-time restore started from pre-attack snapshots…');
+ for(let i=0;i<120;i++){await sleep(1000);const r=(await api('/restores')).filter(x=>x.tenant===t.name);if(r.length>=snaps.length&&r.every(x=>x.status!=='running'))break}
+ const r=(await api('/restores')).filter(x=>x.tenant===t.name);const sum=k=>r.reduce((a,x)=>a+x[k],0);
+ L('6. recovery verification: restored '+sum('objects_restored')+', verified '+sum('objects_verified')+', checksum failures '+sum('checksum_failures'));
+ L('   live state: '+JSON.stringify(await api('/demo/'+t.id+'/live')));
+ L(sum('checksum_failures')===0?'✔ SUCCESS — all data recovered and verified':'✖ verification failures — see restores table')
+ }catch(e){L('ERROR: '+e.message)}$('demoBtn').disabled=false;load()}
+load();setInterval(load,4000);
+</script></body></html>

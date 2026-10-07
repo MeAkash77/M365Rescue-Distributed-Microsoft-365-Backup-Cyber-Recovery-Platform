@@ -1,0 +1,61 @@
+# One command: docker compose up --build   ->   http://localhost:8080  (API key: dev-admin-key)
+x-env: &env
+  DATABASE_URL: postgres://m365:m365@postgres:5432/m365rescue?sslmode=disable
+  REDIS_URL: redis://redis:6379/0
+  S3_ENDPOINT: minio:9000
+  S3_BUCKET: m365rescue-backups
+  S3_ACCESS_KEY: minioadmin
+  S3_SECRET_KEY: minioadmin
+  S3_OBJECT_LOCK: "true"
+  RETENTION_DAYS: "30"
+  ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:-dev-only-master-key-change-me}
+  API_KEYS: ${API_KEYS:-admin:dev-admin-key,operator:dev-operator-key,auditor:dev-auditor-key}
+  AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+  AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
+  SCHEDULE_EVERY: ${SCHEDULE_EVERY:-0}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: m365, POSTGRES_PASSWORD: m365, POSTGRES_DB: m365rescue }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U m365"], interval: 3s, timeout: 3s, retries: 20 }
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redisdata:/data]
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 3s, timeout: 3s, retries: 20 }
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment: { MINIO_ROOT_USER: minioadmin, MINIO_ROOT_PASSWORD: minioadmin }
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [miniodata:/data]
+    healthcheck: { test: ["CMD", "mc", "ready", "local"], interval: 5s, timeout: 5s, retries: 20 }
+  api:
+    build: .
+    command: ["api"]
+    environment: *env
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped
+  worker:
+    build: .
+    command: ["worker"]
+    environment: *env
+    deploy: { replicas: 2 }          # scale: docker compose up -d --scale worker=5
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    restart: unless-stopped          # lets the worker_crash chaos test recover
+  prometheus:
+    image: prom/prometheus:latest
+    volumes: ["./deployments/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+    depends_on: [api, worker]
+
+volumes: { pgdata: {}, redisdata: {}, miniodata: {} }

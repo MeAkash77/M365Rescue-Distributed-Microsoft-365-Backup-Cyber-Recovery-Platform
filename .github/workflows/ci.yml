@@ -1,0 +1,16 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - run: go mod tidy
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: docker build -t m365rescue:ci .
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@master
+        with: { image-ref: "m365rescue:ci", severity: "CRITICAL,HIGH", exit-code: "0" }

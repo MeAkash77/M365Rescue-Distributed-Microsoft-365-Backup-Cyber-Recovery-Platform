@@ -1,0 +1,59 @@
+# Reference manifests. Point DATABASE_URL / REDIS_URL / S3_* at RDS / ElastiCache / S3 (or in-cluster equivalents).
+# kubectl create secret generic m365rescue-secrets --from-literal=DATABASE_URL=... --from-literal=REDIS_URL=... \
+#   --from-literal=S3_ACCESS_KEY=... --from-literal=S3_SECRET_KEY=... --from-literal=ENCRYPTION_MASTER_KEY=... \
+#   --from-literal=API_KEYS=admin:...,operator:...,auditor:... --from-literal=AZURE_CLIENT_ID=... --from-literal=AZURE_CLIENT_SECRET=...
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: m365rescue-config }
+data: { S3_ENDPOINT: s3.amazonaws.com, S3_USE_SSL: "true", S3_BUCKET: m365rescue-backups, S3_OBJECT_LOCK: "true", RETENTION_DAYS: "30", SCHEDULE_EVERY: "1h" }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: m365rescue-api }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: m365rescue-api } }
+  template:
+    metadata: { labels: { app: m365rescue-api } }
+    spec:
+      containers:
+        - name: api
+          image: m365rescue:latest
+          args: ["api"]
+          ports: [{ containerPort: 8080 }]
+          envFrom: [{ configMapRef: { name: m365rescue-config } }, { secretRef: { name: m365rescue-secrets } }]
+          readinessProbe: { httpGet: { path: /healthz, port: 8080 } }
+          resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { memory: 512Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: m365rescue-api }
+spec: { selector: { app: m365rescue-api }, ports: [{ port: 80, targetPort: 8080 }] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: m365rescue-worker }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: m365rescue-worker } }
+  template:
+    metadata:
+      labels: { app: m365rescue-worker }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "9100" }
+    spec:
+      containers:
+        - name: worker
+          image: m365rescue:latest
+          args: ["worker"]
+          envFrom: [{ configMapRef: { name: m365rescue-config } }, { secretRef: { name: m365rescue-secrets } }]
+          resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { memory: 1Gi } }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: m365rescue-worker }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: m365rescue-worker }
+  minReplicas: 2
+  maxReplicas: 20
+  metrics: [{ type: Resource, resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } } }]
+# Production note: scale on queue depth with KEDA (redis-streams scaler) instead of CPU.

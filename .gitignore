@@ -1,0 +1,6 @@
+.env
+*.exe
+/bin/
+go.sum.bak
+.idea/
+.vscode/
